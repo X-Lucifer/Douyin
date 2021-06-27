@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web;
 using Flurl.Http;
@@ -29,7 +28,7 @@ namespace X.Lucifer
                     doc.Sections.Add(new IniSection("douyin")
                     {
                         new IniComment("抖音用户主页地址"),
-                        new IniKeyValue("url", "https://v.douyin.com/e4Q17W3/"),
+                        new IniKeyValue("url", "https://v.douyin.com/e4vSGrG/"),
                         new IniWhiteSpace(),
                         new IniComment("视频保存路径, 不填默认当前目录"),
                         new IniKeyValue("savepath", AppContext.BaseDirectory + @"Download\"),
@@ -46,7 +45,8 @@ namespace X.Lucifer
                 if (section == null)
                 {
                     File.Delete(file);
-                    Console.WriteLine($"date:{DateTime.Now:G} | config file error, is about to be automatically generated , please run the software again...");
+                    Console.WriteLine(
+                        $"date:{DateTime.Now:G} | config file error, is about to be automatically generated , please run the software again...");
                     return;
                 }
 
@@ -67,6 +67,7 @@ namespace X.Lucifer
                         Directory.CreateDirectory(savepath);
                     }
                 }
+
                 xsavepath = savepath;
                 var result = await url
                     .WithHeader("User-Agent",
@@ -85,6 +86,7 @@ namespace X.Lucifer
                     Console.WriteLine("douyin location error...");
                     return;
                 }
+
                 var uri = new Uri(result.Headers.FirstOrDefault(HeaderNames.Location));
                 var uid = HttpUtility.ParseQueryString(uri.Query).Get("sec_uid") ?? "";
                 var baseurl = $"https://www.iesdouyin.com/web/api/v2/aweme/post/?count=99&sec_uid={uid}";
@@ -121,17 +123,15 @@ namespace X.Lucifer
                             foreach (var item in zresult.aweme_list)
                             {
                                 var nickname = item.author?.nickname ?? "";
-                                if (!string.IsNullOrEmpty(nickname))
-                                {
-                                    nickname = Regex.Replace(nickname, @"\W+", "");
-                                }
+                                nickname = nickname.RemoveIllegal();
                                 var name = item.desc ?? item.aweme_id ?? "";
-                                name = Regex.Replace(name, @"\W+", "");
+                                name = name.RemoveIllegal();
                                 var urls = item.video?.play_addr?.url_list;
                                 if (string.IsNullOrEmpty(name) || urls == null || urls.Length <= 0)
                                 {
                                     continue;
                                 }
+
                                 var xurl = urls.FirstOrDefault() ?? "";
                                 if (string.IsNullOrEmpty(xurl))
                                 {
@@ -150,11 +150,38 @@ namespace X.Lucifer
                         }
                     }
                 } while (isnext);
+
                 Console.WriteLine($"date:{DateTime.Now:G} | douyin analysis finished...");
                 Console.WriteLine($"date:{DateTime.Now:G} | start download...");
-                var tasks = xdownlist.Select(item => Task.Run(async () =>
+                await Download(xdownlist, xsavepath);
+            }
+            catch (Exception)
+            {
+                Console.WriteLine($"date:{DateTime.Now:G} | error: download error, please try again... ");
+                if (!string.IsNullOrEmpty(xsavepath))
                 {
-                    var zpath = savepath;
+                    if (Directory.Exists(xsavepath))
+                    {
+                        Process.Start(xsavepath);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 下载
+        /// </summary>
+        /// <param name="list"></param>
+        /// <param name="xsavepath"></param>
+        /// <returns></returns>
+        private static async Task Download(HashSet<VideoInfo> list, string xsavepath)
+        {
+            try
+            {
+                Random rand = new Random();
+                var tasks = list.Select(item => Task.Run(async () =>
+                {
+                    var zpath = xsavepath;
                     if (!string.IsNullOrEmpty(item.NickName))
                     {
                         zpath = zpath + item.NickName + @"\";
@@ -172,22 +199,17 @@ namespace X.Lucifer
                             Console.WriteLine($"date:{DateTime.Now:G} | download: {xfile}, error...");
                         }).DownloadFileAsync(zpath, item.Name + ".mp4", 2048);
                         Console.WriteLine($"date:{DateTime.Now:G} | download: {xresult}");
+                        await Task.Delay(rand.Next(1, 5) * 500);
                     }
                 })).ToList();
                 await Task.WhenAll(tasks);
-                Console.WriteLine($"date:{DateTime.Now:G} | download finished, will automatically open the download directory...");
+                Console.WriteLine(
+                    $"date:{DateTime.Now:G} | download finished, will automatically open the download directory...");
                 Process.Start(xsavepath);
             }
-            catch (Exception)
+            catch (Exception e)
             {
-                Console.WriteLine($"date:{DateTime.Now:G} | error: download error, please try again... ");
-                if (!string.IsNullOrEmpty(xsavepath))
-                {
-                    if (Directory.Exists(xsavepath))
-                    {
-                        Process.Start(xsavepath);
-                    }
-                }
+                throw new Exception(e.Message);
             }
         }
     }
