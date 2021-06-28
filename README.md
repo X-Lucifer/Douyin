@@ -25,7 +25,7 @@
 ```ini
 [douyin]
 ;抖音用户主页地址
-url=https://v.douyin.com/e4Q17W3/
+url=https://v.douyin.com/e4vSGrG/
 
 ;视频保存路径, 不填默认当前目录
 savepath=E:\Download\Douyin\Download\
