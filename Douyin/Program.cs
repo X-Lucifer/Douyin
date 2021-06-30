@@ -1,25 +1,30 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Threading.Tasks;
 using System.Web;
 using Flurl.Http;
 using Microsoft.Net.Http.Headers;
 using Newtonsoft.Json;
+using NLog;
 using TG.INI;
 
 namespace X.Lucifer
 {
     class Program
     {
+        private static readonly Logger _log = LogManager.GetCurrentClassLogger();
+
         static async Task Main(string[] args)
         {
             var xsavepath = "";
             try
             {
-                Console.WriteLine($"date:{DateTime.Now:G} | start...");
+                _log.Info("start...");
                 var file = AppContext.BaseDirectory + "config.ini";
                 if (!File.Exists(file))
                 {
@@ -37,7 +42,7 @@ namespace X.Lucifer
                         new IniKeyValue("onlyfirst", "false")
                     });
                     doc.Write(xfile);
-                    Console.WriteLine($"date:{DateTime.Now:G} | config file not exists, created finished...");
+                    _log.Info("config file not exists, created finished...");
                 }
 
                 var xdoc = new IniDocument(file);
@@ -45,8 +50,7 @@ namespace X.Lucifer
                 if (section == null)
                 {
                     File.Delete(file);
-                    Console.WriteLine(
-                        $"date:{DateTime.Now:G} | config file error, is about to be automatically generated , please run the software again...");
+                    _log.Error("config file error, is about to be automatically generated , please run the software again...");
                     return;
                 }
 
@@ -55,7 +59,7 @@ namespace X.Lucifer
                 var onlyfirst = section["onlyfirst"]?.ValueBoolean ?? false;
                 if (string.IsNullOrEmpty(url))
                 {
-                    Console.WriteLine($"date:{DateTime.Now:G} | douyin url error...");
+                    _log.Error("douyin url error...");
                     return;
                 }
 
@@ -76,14 +80,14 @@ namespace X.Lucifer
                     .WithHeader("Accept-Encoding", "gzip, deflate, br").WithAutoRedirect(false).GetAsync();
                 if (result == null)
                 {
-                    Console.WriteLine($"date:{DateTime.Now:G} | douyin analysis error...");
+                    _log.Error("douyin analysis error...");
                     return;
                 }
 
                 var location = result.Headers.FirstOrDefault(HeaderNames.Location) ?? "";
                 if (string.IsNullOrEmpty(location))
                 {
-                    Console.WriteLine("douyin location error...");
+                    _log.Error("douyin location error...");
                     return;
                 }
 
@@ -92,7 +96,7 @@ namespace X.Lucifer
                 var baseurl = $"https://www.iesdouyin.com/web/api/v2/aweme/post/?count=99&sec_uid={uid}";
                 var isnext = !onlyfirst;
                 long cursor = 0;
-                var xdownlist = new HashSet<VideoInfo>();
+                var xdownlist = new ConcurrentBag<VideoInfo>();
                 var retry = 0;
                 do
                 {
@@ -115,7 +119,7 @@ namespace X.Lucifer
 
                             cursor = zresult?.max_cursor ?? 0;
                             retry++;
-                            Console.WriteLine($"date:{DateTime.Now:G} | douyin retry: {retry}...");
+                            _log.Info($"douyin retry: {retry}...");
                         }
                         else
                         {
@@ -138,6 +142,11 @@ namespace X.Lucifer
                                     continue;
                                 }
 
+                                if (xdownlist.Any(x => x.Id == item.aweme_id))
+                                {
+                                    continue;
+                                }
+
                                 xdownlist.Add(new VideoInfo
                                 {
                                     Id = item.aweme_id,
@@ -145,19 +154,19 @@ namespace X.Lucifer
                                     NickName = nickname,
                                     Url = xurl
                                 });
-                                Console.WriteLine($"date:{DateTime.Now:G} | analysis: {name}...");
+                                _log.Info($"analysis: {name}...");
                             }
                         }
                     }
                 } while (isnext);
 
-                Console.WriteLine($"date:{DateTime.Now:G} | douyin analysis finished...");
-                Console.WriteLine($"date:{DateTime.Now:G} | start download...");
+                _log.Info("douyin analysis finished...");
+                _log.Info("start download...");
                 await Download(xdownlist, xsavepath);
             }
             catch (Exception)
             {
-                Console.WriteLine($"date:{DateTime.Now:G} | error: download error, please try again... ");
+                _log.Error("download error, please try again... ");
                 if (!string.IsNullOrEmpty(xsavepath))
                 {
                     if (Directory.Exists(xsavepath))
@@ -165,6 +174,10 @@ namespace X.Lucifer
                         Process.Start(xsavepath);
                     }
                 }
+            }
+            finally
+            {
+                LogManager.Shutdown();
             }
         }
 
@@ -174,37 +187,67 @@ namespace X.Lucifer
         /// <param name="list"></param>
         /// <param name="xsavepath"></param>
         /// <returns></returns>
-        private static async Task Download(HashSet<VideoInfo> list, string xsavepath)
+        private static async Task Download(ConcurrentBag<VideoInfo> list, string xsavepath)
         {
             try
             {
-                Random rand = new Random();
+                var rand = new Random();
                 var tasks = list.Select(item => Task.Run(async () =>
                 {
-                    var zpath = xsavepath;
-                    if (!string.IsNullOrEmpty(item.NickName))
+                    try
                     {
-                        zpath = zpath + item.NickName + @"\";
-                        if (!Directory.Exists(zpath))
+                        var zpath = xsavepath;
+                        if (!string.IsNullOrEmpty(item.NickName))
                         {
-                            Directory.CreateDirectory(zpath);
+                            zpath = zpath + item.NickName + @"\";
+                            if (!Directory.Exists(zpath))
+                            {
+                                Directory.CreateDirectory(zpath);
+                            }
+                        }
+
+                        var xfile = zpath + item.Name + ".mp4";
+                        if (File.Exists(xfile))
+                        {
+                            _log.Info($"exists: {xfile}, skipped...");
+                        }
+                        else
+                        {
+                            var xresult = await item.Url.WithTimeout(60).GetAsync();
+                            if (xresult!=null&&xresult.StatusCode == (int)HttpStatusCode.OK)
+                            {
+                                var response = xresult?.ResponseMessage?.Content;
+                                if (response != null)
+                                {
+                                    var stream = await response.ReadAsStreamAsync();
+                                    using (var file = new FileStream(xfile, FileMode.Create, FileAccess.ReadWrite, FileShare.ReadWrite))
+                                    {
+                                        await stream.CopyToAsync(file);
+                                        _log.Info($"download: {xfile}");
+                                    }
+                                }
+                                else
+                                {
+                                    _log.Info($"download: {xfile} , nocontent");
+                                }
+                            }
+                            else
+                            {
+                                _log.Info($"download: {xfile}, fail...");
+                            }
+
+                            await Task.Delay(rand.Next(1, 3) * 300);
                         }
                     }
-
-                    var xfile = zpath + item.Name + ".mp4";
-                    if (!File.Exists(xfile))
+                    catch (Exception e)
                     {
-                        var xresult = await item.Url.WithTimeout(20).OnError(x =>
-                        {
-                            Console.WriteLine($"date:{DateTime.Now:G} | download: {xfile}, error...");
-                        }).DownloadFileAsync(zpath, item.Name + ".mp4", 2048);
-                        Console.WriteLine($"date:{DateTime.Now:G} | download: {xresult}");
-                        await Task.Delay(rand.Next(1, 5) * 500);
+                        _log.Error($"task: {item.Name} , error: {e}");
+                        await Task.Delay(rand.Next(1, 5) * 400);
+                        await Task.CompletedTask;
                     }
                 })).ToList();
                 await Task.WhenAll(tasks);
-                Console.WriteLine(
-                    $"date:{DateTime.Now:G} | download finished, will automatically open the download directory...");
+                _log.Info("all download finished...");
                 Process.Start(xsavepath);
             }
             catch (Exception e)
