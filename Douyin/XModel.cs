@@ -10,7 +10,7 @@
         public bool has_more { get; set; }
     }
 
-    public class VideoInfo
+    public class XFileInfo
     {
         public string Id { get; set; }
 
@@ -19,6 +19,9 @@
         public string NickName { get; set; }
 
         public string Url { get; set; }
+        public int Index { get; set; }
+
+        public int AwemeType { get; set; }
     }
 
     public class Extra

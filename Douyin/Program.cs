@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -50,11 +49,21 @@ namespace X.Lucifer
                 if (section == null)
                 {
                     File.Delete(file);
-                    _log.Error("config file error, is about to be automatically generated , please run the software again...");
+                    _log.Error(
+                        "config file error, is about to be automatically generated , please run the software again...");
                     return;
                 }
 
-                var url = section["url"]?.Value ?? "";
+                var url = section["url"]?.Value.GetUrl() ?? "";
+                //抖音地址验证
+                if (!url.Contains("www.iesdouyin.com") && !url.Contains("v.douyin.com"))
+                {
+                    File.Delete(file);
+                    _log.Error(
+                        "config file error, is about to be automatically generated , please run the software again...");
+                    return;
+                }
+
                 var savepath = section["savepath"]?.Value ?? "";
                 var onlyfirst = section["onlyfirst"]?.ValueBoolean ?? false;
                 if (string.IsNullOrEmpty(url))
@@ -73,30 +82,47 @@ namespace X.Lucifer
                 }
 
                 xsavepath = savepath;
-                var result = await url
-                    .WithHeader("User-Agent",
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.82 Safari/537.36 Edg/89.0.774.48")
-                    .WithHeader("Accept", "*/*")
-                    .WithHeader("Accept-Encoding", "gzip, deflate, br").WithAutoRedirect(false).GetAsync();
-                if (result == null)
+                Uri uri;
+                //添加完整主页地址支持
+                if (url.Contains("v.douyin.com"))
                 {
-                    _log.Error("douyin analysis error...");
-                    return;
+                    var result = await url
+                        .WithHeader("User-Agent",
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.82 Safari/537.36 Edg/89.0.774.48")
+                        .WithHeader("Accept", "*/*")
+                        .WithHeader("Accept-Encoding", "gzip, deflate, br").WithAutoRedirect(false).GetAsync();
+                    if (result == null)
+                    {
+                        _log.Error("douyin analysis error...");
+                        return;
+                    }
+                    var location = result.Headers.FirstOrDefault(HeaderNames.Location) ?? "";
+                    if (string.IsNullOrEmpty(location))
+                    {
+                        _log.Error("douyin location error...");
+                        return;
+                    }
+                    uri = new Uri(result.Headers.FirstOrDefault(HeaderNames.Location));
                 }
-
-                var location = result.Headers.FirstOrDefault(HeaderNames.Location) ?? "";
-                if (string.IsNullOrEmpty(location))
+                else
                 {
-                    _log.Error("douyin location error...");
-                    return;
+                    uri = new Uri(url);
                 }
-
-                var uri = new Uri(result.Headers.FirstOrDefault(HeaderNames.Location));
                 var uid = HttpUtility.ParseQueryString(uri.Query).Get("sec_uid") ?? "";
+                if (string.IsNullOrEmpty(uid))
+                {
+                    File.Delete(file);
+                    _log.Error(
+                        "config file error, is about to be automatically generated , please run the software again...");
+                    return;
+                }
                 var baseurl = $"https://www.iesdouyin.com/web/api/v2/aweme/post/?count=99&sec_uid={uid}";
                 var isnext = !onlyfirst;
                 long cursor = 0;
-                var xdownlist = new ConcurrentBag<VideoInfo>();
+                //视频列表
+                var xdownlist = new ConcurrentBag<XFileInfo>();
+                //相册列表
+                var xalbumlist = new ConcurrentBag<XFileInfo>();
                 var retry = 0;
                 do
                 {
@@ -126,10 +152,29 @@ namespace X.Lucifer
                             cursor = zresult.max_cursor;
                             foreach (var item in zresult.aweme_list)
                             {
+                                if (item.aweme_type != 2 && item.aweme_type != 4)
+                                {
+                                    continue;
+                                }
+
                                 var nickname = item.author?.nickname ?? "";
                                 nickname = nickname.RemoveIllegal();
                                 var name = item.desc ?? item.aweme_id ?? "";
                                 name = name.RemoveIllegal();
+                                if (item.aweme_type == 2)
+                                {
+                                    //相册类型单独处理
+                                    xalbumlist.Add(new XFileInfo
+                                    {
+                                        Id = item.aweme_id,
+                                        Name = name,
+                                        NickName = nickname,
+                                        Url =
+                                            $"https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids={item.aweme_id}",
+                                        AwemeType = item.aweme_type
+                                    });
+                                    continue;
+                                }
                                 var urls = item.video?.play_addr?.url_list;
                                 if (string.IsNullOrEmpty(name) || urls == null || urls.Length <= 0)
                                 {
@@ -147,12 +192,13 @@ namespace X.Lucifer
                                     continue;
                                 }
 
-                                xdownlist.Add(new VideoInfo
+                                xdownlist.Add(new XFileInfo
                                 {
                                     Id = item.aweme_id,
                                     Name = name,
                                     NickName = nickname,
-                                    Url = xurl
+                                    Url = xurl,
+                                    AwemeType = item.aweme_type
                                 });
                                 _log.Info($"analysis: {name}...");
                             }
@@ -162,7 +208,11 @@ namespace X.Lucifer
 
                 _log.Info("douyin analysis finished...");
                 _log.Info("start download...");
-                await Download(xdownlist, xsavepath);
+                await Download(xdownlist, xsavepath, 4);
+                if (xalbumlist.Count > 0)
+                {
+                    await AnalysisAlbums(xalbumlist, xsavepath, 2);
+                }
             }
             catch (Exception)
             {
@@ -182,12 +232,87 @@ namespace X.Lucifer
         }
 
         /// <summary>
+        /// 解析相册
+        /// </summary>
+        /// <param name="list"></param>
+        /// <param name="xsavepath"></param>
+        /// <param name="type"></param>
+        /// <returns></returns>
+        private static async Task AnalysisAlbums(ConcurrentBag<XFileInfo> list, string xsavepath, int type)
+        {
+            try
+            {
+                var xlist = new ConcurrentBag<XFileInfo>();
+                var tasks = list.Select(item => Task.Run(async () =>
+                {
+                    try
+                    {
+                        var xresult = await item.Url.WithTimeout(60).GetJsonAsync<XAlbumModel>();
+                        if (xresult?.item_list != null && xresult.item_list.Length > 0)
+                        {
+                            var ximgs = xresult.item_list.FirstOrDefault();
+                            if (ximgs != null)
+                            {
+                                int xindex = 1;
+                                foreach (var xitem in ximgs.images)
+                                {
+                                    var xurl = xitem.url_list.FirstOrDefault(x => x.Contains("jpeg"));
+                                    if (string.IsNullOrEmpty(xurl))
+                                    {
+                                        xurl = xitem.url_list.FirstOrDefault() ?? "";
+                                    }
+
+                                    if (string.IsNullOrEmpty(xurl))
+                                    {
+                                        continue;
+                                    }
+
+                                    xlist.Add(new XFileInfo
+                                    {
+                                        Id = item.Id,
+                                        Url = xurl,
+                                        Name = item.Name,
+                                        NickName = item.NickName,
+                                        AwemeType = item.AwemeType,
+                                        Index = xindex
+                                    });
+                                    xindex++;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            _log.Info($"analysis: {item.Name}|{item.Id}, fail...");
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        _log.Error($"task: {item.Name}|{item.Id} , error: {e}");
+                        await Task.CompletedTask;
+                    }
+                }));
+                await Task.WhenAll(tasks);
+                if (xlist.Count > 0)
+                {
+                    await Download(xlist, xsavepath, type);
+                }
+
+                _log.Info("all album analysis finished...");
+            }
+            catch (Exception e)
+            {
+                throw new Exception(e.Message);
+            }
+        }
+
+        /// <summary>
         /// 下载
         /// </summary>
         /// <param name="list"></param>
         /// <param name="xsavepath"></param>
+        /// <param name="type"></param>
         /// <returns></returns>
-        private static async Task Download(ConcurrentBag<VideoInfo> list, string xsavepath)
+        private static async Task Download(ConcurrentBag<XFileInfo> list, string xsavepath, int type)
         {
             try
             {
@@ -206,7 +331,9 @@ namespace X.Lucifer
                             }
                         }
 
-                        var xfile = zpath + item.Name + ".mp4";
+                        var xfile = item.AwemeType == 4
+                            ? $"{zpath}{item.Name}.mp4"
+                            : $"{zpath}{item.Name}_{item.Index}.jpeg";
                         if (File.Exists(xfile))
                         {
                             _log.Info($"exists: {xfile}, skipped...");
@@ -214,13 +341,14 @@ namespace X.Lucifer
                         else
                         {
                             var xresult = await item.Url.WithTimeout(60).GetAsync();
-                            if (xresult!=null&&xresult.StatusCode == (int)HttpStatusCode.OK)
+                            if (xresult != null && xresult.StatusCode == (int) HttpStatusCode.OK)
                             {
-                                var response = xresult?.ResponseMessage?.Content;
+                                var response = xresult.ResponseMessage?.Content;
                                 if (response != null)
                                 {
                                     var stream = await response.ReadAsStreamAsync();
-                                    using (var file = new FileStream(xfile, FileMode.Create, FileAccess.ReadWrite, FileShare.ReadWrite))
+                                    using (var file = new FileStream(xfile, FileMode.Create, FileAccess.ReadWrite,
+                                        FileShare.ReadWrite))
                                     {
                                         await stream.CopyToAsync(file);
                                         _log.Info($"download: {xfile}");
@@ -236,7 +364,10 @@ namespace X.Lucifer
                                 _log.Info($"download: {xfile}, fail...");
                             }
 
-                            await Task.Delay(rand.Next(1, 3) * 300);
+                            if (item.AwemeType == 4)
+                            {
+                                await Task.Delay(rand.Next(1, 3) * 300);
+                            }
                         }
                     }
                     catch (Exception e)
@@ -247,8 +378,8 @@ namespace X.Lucifer
                     }
                 })).ToList();
                 await Task.WhenAll(tasks);
-                _log.Info("all download finished...");
-                Process.Start(xsavepath);
+                var xtype = type == 4 ? "video" : "album";
+                _log.Info($"all {xtype} download finished...");
             }
             catch (Exception e)
             {
