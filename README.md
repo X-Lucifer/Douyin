@@ -14,7 +14,7 @@
 > 支持最新视频解析<br />
 
 #### 下载地址:
-> 点击[这里](https://github.com/X-Lucifer/Douyin/releases)下载最新版本<br />
+> 点击[这里](https://github.com/X-Lucifer/Douyin/releases/latest)下载最新版本<br />
 > 软件分为安装版和便携版, 安装版需要安装才能使用, 便携版解压即可直接使用<br />
 > 安装版: Douyin.Tools.exe<br />
 > 便携版: Douyin.Tools.Portable.zip<br />
